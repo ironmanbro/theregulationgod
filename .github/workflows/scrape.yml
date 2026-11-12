@@ -1,0 +1,95 @@
+name: Daily regulator scrape
+
+on:
+  schedule:
+    - cron: "37 1 * * *"   # 07:07 IST daily
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Comma-separated regulator codes for the generic scraper (blank = all)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Print results without saving"
+        type: boolean
+        default: false
+
+concurrency:
+  group: scrape
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      HF_HOME: ${{ github.workspace }}/.hf-cache
+      SKIP_EMBED: "1"            # embeddings run once at the end instead of after each scraper
+      MAX_PAGES: "3"
+    defaults:
+      run:
+        working-directory: scrapers
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check database secret
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::Add a DATABASE_URL repository secret pointing at a PostgreSQL database reachable from GitHub."
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        working-directory: .
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Cache embedding model and scraper rules
+        uses: actions/cache@v4
+        with:
+          path: |
+            .hf-cache
+            scrapers/models
+          key: scrape-cache-${{ hashFiles('requirements.txt') }}
+
+      - name: Apply schema
+        if: ${{ !inputs.dry_run }}
+        working-directory: .
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f database/schema.sql
+
+      - name: RBI and SEBI
+        if: ${{ !inputs.dry_run && inputs.only == '' }}
+        continue-on-error: true
+        run: python rbi_sebi_scraper.py
+
+      - name: Other regulators
+        id: generic
+        continue-on-error: true
+        env:
+          ONLY: ${{ inputs.only }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          args=()
+          if [ -n "$ONLY" ]; then args+=(--only "$ONLY"); fi
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          python generic_scraper.py "${args[@]}"
+
+      - name: Create embeddings
+        if: ${{ !inputs.dry_run }}
+        run: python embedder.py
+
+      - name: Row counts
+        if: ${{ !inputs.dry_run }}
+        working-directory: .
+        run: |
+          psql "$DATABASE_URL" -c "SELECT r.code, count(m.id) AS rows, max(m.issue_date) AS latest
+            FROM regulators r LEFT JOIN regulations_master m ON m.regulator_id = r.id
+            GROUP BY r.id, r.code ORDER BY r.id;"
