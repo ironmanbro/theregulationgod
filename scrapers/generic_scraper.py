@@ -182,7 +182,11 @@ def main() -> None:
                 print(f"{code:7} {c.issue_date} {c.reference_no[:30]:30} {c.title[:80]}")
             summary[code] = len(items)
         else:
-            summary[code] = persist(items, dsn)
+            try:
+                summary[code] = persist(items, dsn)
+            except Exception as exc:  # noqa: BLE001
+                log.error("[%s] save failed: %s", code, exc)
+                summary[code] = "ERROR"
     log.info("summary: %s", summary)
     zero = [c for c, n in summary.items() if n in (0, "ERROR")]
     if zero:

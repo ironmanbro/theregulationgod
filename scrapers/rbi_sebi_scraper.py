@@ -164,7 +164,9 @@ class RBIScraper(BaseScraper):
             if not link or not d:
                 continue
             ref = cells[0].get_text(" ", strip=True)
-            title = cells[-1].get_text(" ", strip=True) or link.get_text(strip=True)
+            # Columns: reference, date, department, subject, addressees. Subject is cells[3].
+            subject = cells[3] if len(cells) >= 5 else cells[-1]
+            title = subject.get_text(" ", strip=True) or link.get_text(strip=True)
             href = urljoin(self.base, link["href"])
             pdf = row.find("a", href=re.compile(r"\.pdf", re.I))
             out.append(Circular("RBI", ref[:200], title, d, href,
@@ -225,6 +227,14 @@ class SEBIScraper(BaseScraper):
 def persist(items: list[Circular], dsn: str) -> int:
     if not items:
         return 0
+    # ON CONFLICT cannot touch the same row twice in one statement: keep the first per (regulator, ref).
+    seen, unique = set(), []
+    for c in items:
+        key = (c.regulator, c.reference_no)
+        if key not in seen:
+            seen.add(key)
+            unique.append(c)
+    items = unique
     with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT code, id FROM regulators")
         ids = dict(cur.fetchall())
