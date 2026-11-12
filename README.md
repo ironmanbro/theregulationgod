@@ -65,6 +65,22 @@ If you change `VITE_API_URL` to another address, also add the dashboard's addres
 
 If the build fails with `429 Too Many Requests`, Docker Hub is limiting downloads. Wait and try again, or sign in with `docker login`.
 
+## Hosted deployment (Render + Cloudflare Pages)
+
+- **Database:** a PostgreSQL database with pgvector, such as Neon or Supabase. Apply the schema once:
+  ```bash
+  psql "$DATABASE_URL" -f database/schema.sql
+  ```
+- **Backend on Render:** create a Blueprint from this repository (it reads `render.yaml`). Set `DATABASE_URL` and `CORS_ORIGINS` in the Render dashboard. The API health check is `/health`.
+- **Dashboard on Cloudflare Pages:** create a Pages project from this repository with:
+  - Root directory: `frontend`
+  - Build command: `npm ci && npm run build`
+  - Build output directory: `dist`
+  - Environment variable `VITE_API_URL`: the Render API address, e.g. `https://reghub-api.onrender.com`
+- **Scrapers:** the daily GitHub Actions workflow uses the same database, via the `DATABASE_URL` repository secret.
+
+Render's free tier sleeps after inactivity, so the first request after a pause can take a minute.
+
 ## Manual setup
 
 Use this to run the parts without Docker, for example while developing.

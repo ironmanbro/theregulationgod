@@ -1,0 +1,16 @@
+# Render Blueprint: the FastAPI backend. Dashboard is hosted on Cloudflare Pages (see README).
+services:
+  - type: web
+    name: reghub-api
+    runtime: docker
+    dockerfilePath: ./docker/python.Dockerfile
+    dockerContext: .
+    dockerCommand: uvicorn main:app --host 0.0.0.0 --port 10000
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL          # set in the Render dashboard: your Neon or Supabase connection string
+        sync: false
+      - key: CORS_ORIGINS          # set to your Pages address, e.g. https://reghub.pages.dev
+        sync: false
+      - key: PORT
+        value: "10000"
