@@ -22,16 +22,18 @@ from urllib.parse import urljoin, urlparse
 
 import psycopg2
 from bs4 import BeautifulSoup, Tag
+from urllib.parse import unquote
 
 from rbi_sebi_scraper import BaseScraper, Circular, parse_date, persist
 
 log = logging.getLogger("reghub.generic")
 
+# Lookarounds, not \b: file names put dates next to underscores, which count as word characters.
 DATE_RE = re.compile(
-    r"\b(\d{1,2}[./-]\d{1,2}[./-]\d{4}"
+    r"(?<!\d)(\d{1,2}[./-]\d{1,2}[./-]\d{4}"
     r"|\d{4}-\d{2}-\d{2}"
     r"|\d{1,2}[ -](?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*[ -,]*\d{4}"
-    r"|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]* \d{1,2},? \d{4})\b", re.I)
+    r"|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]* \d{1,2},? \d{4})(?!\d)", re.I)
 GENERIC_REF_RE = re.compile(
     r"\b((?:F\.?\s?No\.?|No\.?|G\.?S\.?R\.?|S\.?O\.?|Press Note No\.?|Circular No\.?|Notification No\.?)"
     r"\s*[:.\-]?\s*[A-Za-z0-9][A-Za-z0-9/\-.()]{2,60}\d)", re.I)
@@ -48,10 +50,12 @@ class SourceConfig:
     ref_pattern: str | None = None          # regex with one group for the reference number
     min_title_len: int = 15
     extra_headers: dict = field(default_factory=dict)
+    render: bool = False                    # load the page in a headless browser (for JavaScript sites)
 
 
 # Starting points only: confirm each against the live site (see README note in main()).
 OVERRIDES: dict[str, SourceConfig] = {
+    "FSSAI":  SourceConfig(render=True, link_filter=r"\.pdf(\?|$)"),
     "DPIIT":  SourceConfig(ref_pattern=r"(Press Note No\.?\s*\d+\s*\(\d{4}(?:\s*Series)?\))"),
     "MCA":    SourceConfig(ref_pattern=r"((?:G\.S\.R|S\.O)\.?\s*\d+\s*\(E\))"),
     "CBDT":   SourceConfig(ref_pattern=r"(Notification No\.?\s*\d+/\d{4})"),
@@ -61,7 +65,6 @@ OVERRIDES: dict[str, SourceConfig] = {
     "IRDAI":  SourceConfig(ref_pattern=r"(IRDAI/[A-Za-z0-9/\-&]+/\d{4}(?:-\d{2})?/?\d*)"),
     "PFRDA":  SourceConfig(ref_pattern=r"(PFRDA/\d{4}/\d+/[A-Z\-]+/\d+)"),
     "TRAI":   SourceConfig(page_param="page", page_start=0, max_pages=3),
-    "FSSAI":  SourceConfig(ref_pattern=r"(F\.?\s?No\.?\s*[A-Za-z0-9/\-.()]+\d)"),
     # NSE and BSE are handled by exchange_scraper.py.
 }
 
@@ -85,6 +88,10 @@ class GenericScraper(BaseScraper):
             params = {self.cfg.page_param: self.cfg.page_start + page - 1}
         elif page > 1:
             return BeautifulSoup("", "lxml")  # no pagination configured: stop after page 1
+        if self.cfg.render:
+            from browser import render_html
+            url = self.index_url + ("?" + "&".join(f"{k}={v}" for k, v in params.items()) if params else "")
+            return BeautifulSoup(render_html(url), "lxml")
         r = self.session.get(self.index_url, params=params, timeout=30)
         r.raise_for_status()
         return BeautifulSoup(r.text, "lxml")
@@ -124,7 +131,8 @@ class GenericScraper(BaseScraper):
             is_pdf = bool(re.search(r"\.pdf(\?|$)", url, re.I))
             row = self._row(a)
             row_text = re.sub(r"\s+", " ", row.get_text(" ", strip=True))
-            m = DATE_RE.search(row_text)
+            fname = unquote(url.rsplit("/", 1)[-1]).rsplit(".", 1)[0]
+            m = DATE_RE.search(row_text) or DATE_RE.search(fname)
             d = parse_date(m.group(1)) if m else None
             if not d and not is_pdf:
                 continue
@@ -135,6 +143,11 @@ class GenericScraper(BaseScraper):
                 cleaned = re.sub(r"\b(download|view|click here|read more|pdf)\b|\(\s*\d+(\.\d+)?\s*[KM]B\s*\)", "",
                                  cleaned, flags=re.I)
                 title = (re.sub(r"\s+", " ", cleaned).strip(" -|:") or title)[:500]
+            generic_link = bool(re.match(r"(pdf|download|format|view)\b|\[[\d.]+ ?[KM]B\]", title, re.I))
+            if is_pdf and (generic_link or len(title) < self.cfg.min_title_len):
+                from_file = re.sub(r"\s+", " ", DATE_RE.sub("", fname).replace("_", " ")).strip(" -|:")
+                if len(from_file) >= self.cfg.min_title_len:
+                    title = from_file
             if len(title) < self.cfg.min_title_len or not d:
                 continue
             out[url] = Circular(self.regulator, self._reference(f"{title} {row_text}", url)[:200],
